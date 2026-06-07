@@ -2,8 +2,10 @@ from __future__ import annotations
 import os
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
-from app.core import session_manager, aggregate, format_for_agent
-from app.agent import run_lunch_agent, generate_insight
+from app.core.session_manager import session_manager
+from app.core.preference_aggregator import aggregate, format_for_agent
+from app.agent.lunch_agent import run_lunch_agent
+from app.agent.insights import generate_insight
 from app.db import ledger
 from app.models import MemberPreference
 from app.bot import blocks

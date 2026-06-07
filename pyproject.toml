@@ -5,6 +5,7 @@ description = "Team Lunch Coordinator + Food Spend Intelligence — Slack bot on
 readme = "README.md"
 requires-python = ">=3.14.2"
 dependencies = [
+    "aiohttp>=3.14.0",
     "aiosqlite>=0.22.1",
     "fastapi>=0.136.3",
     "httpx>=0.28.1",
@@ -19,15 +20,16 @@ dependencies = [
     "uvicorn[standard]>=0.48.0",
 ]
 
-[project.scripts]
-start = "uvicorn main:api --host 0.0.0.0 --port 8000"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "httpx>=0.28.1",
     "pyflakes>=3.4.0",
     "pytest>=9.0.3",

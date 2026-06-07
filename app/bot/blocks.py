@@ -1,5 +1,5 @@
 from __future__ import annotations
-from models import LunchSession, PlacedOrder, AggregatedPreference, SpendSummary
+from app.models import LunchSession, PlacedOrder, AggregatedPreference, SpendSummary
 
 HELP_TEXT = """
 *LunchLedger Commands*

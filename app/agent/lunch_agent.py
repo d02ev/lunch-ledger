@@ -1,10 +1,9 @@
 from __future__ import annotations
 import os
 from datetime import date
-from langchain.agents import AgentExecutor, create_react_agent
+from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain.tools import tool
-from langchain import hub
 from app.models import AggregatedPreference, PlacedOrder, OrderItem
 from app.agent import swiggy_client
 
@@ -94,16 +93,14 @@ GITHUB_TOKEN   = os.getenv("GITHUB_TOKEN")
 GITHUB_MODELS_URL = "https://models.inference.ai.azure.com"
 
 
-def build_agent() -> AgentExecutor:
+def build_agent():
     llm = ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0,
         base_url=GITHUB_MODELS_URL,
         api_key=GITHUB_TOKEN,
     )
-    prompt = hub.pull("hwchase17/react")
-    agent = create_react_agent(llm, TOOLS, prompt)
-    return AgentExecutor(agent=agent, tools=TOOLS, verbose=True, max_iterations=8)
+    return create_agent(model=llm, tools=TOOLS, debug=True)
 
 
 # ── Main Orchestration Entry Point ─────────────────────────────────────────────
@@ -133,23 +130,22 @@ Team preferences:
 - Budget ceiling per person: ₹{agg.budget_ceiling}
 - Team size: {agg.member_count}
 
-Steps:
-1. Search for {agg.mode} restaurants for "{cuisine_hint}" cuisine.
-2. If mode is "delivery", also check the menu and build a sample cart.
-3. If mode is "dine_out", check available slots for today.
-4. Pick the best restaurant that satisfies ALL dietary restrictions and fits the budget.
-5. Clearly explain WHY you picked this restaurant in 2-3 sentences.
-6. Return your final answer in this exact format:
-   RESTAURANT_NAME: <name>
-   RESTAURANT_ID: <id>
-   REASONING: <your 2-3 sentence explanation>
-   CART_OR_SLOT: <cart_id or slot_id from the API>
-   ESTIMATED_TOTAL: <total in ₹>
+Search for {agg.mode} restaurants for "{cuisine_hint}" cuisine.
+If mode is "delivery", check the menu and build a sample cart.
+If mode is "dine_out", check available slots for today.
+Pick the best restaurant that satisfies ALL dietary restrictions and fits the budget.
+
+Return your final answer in this exact format:
+RESTAURANT_NAME: <name>
+RESTAURANT_ID: <id>
+REASONING: <your 2-3 sentence explanation>
+CART_OR_SLOT: <cart_id or slot_id from the API>
+ESTIMATED_TOTAL: <total in ₹>
 """
 
-    executor = build_agent()
-    result = await executor.ainvoke({"input": task})
-    output = result.get("output", "")
+    agent = build_agent()
+    result = await agent.ainvoke({"messages": [{"role": "user", "content": task}]})
+    output = result["messages"][-1].content
 
     # ── Parse agent output ────────────────────────────────────────────────────
     lines = {

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from dotenv import load_dotenv
 
-from app.db import init_db
+from app.db.database import init_db
 from app.bot.handlers import app as slack_app, handler
 
 load_dotenv()

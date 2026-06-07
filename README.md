@@ -35,7 +35,7 @@ LunchLedger solves both — in Slack, where the conversation already happens.
 
 /lunch report monthly
 → Total spend vs budget, delivery/dine-out split, top restaurant, per-person breakdown
-→ Claude-generated insight: "You're on track but spending 40% more on Fridays..."
+→ AI-generated insight: "You're on track but spending 40% more on Fridays..."
 ```
 
 ---
@@ -55,58 +55,115 @@ Aggregator          + Budget Tracking
     │                   │
 LangChain Agent ────────┘
   ┌──────┴──────┐
-Food MCP    Dineout MCP        Claude API
-(delivery)  (dine-in)         (insights)
+Food MCP    Dineout MCP     GitHub Models
+(delivery)  (dine-in)       gpt-4o-mini
+                            (agent + insights)
 ```
 
 ### Key Design Decisions
 
 | Decision | Rationale |
 |---|---|
-| Socket Mode (no ngrok) | Zero infrastructure overhead for demo and local dev |
+| Socket Mode (no ngrok) | Zero infrastructure overhead — no redirect URIs, no public URL needed |
 | SQLite + aiosqlite | No DB server needed; persists across restarts via Docker volume |
+| uv | Fast, deterministic installs; single tool for env + package management |
+| GitHub Models (free tier) | Single `GITHUB_TOKEN` covers all LLM calls — agent and insights |
+| `gpt-4o-mini` for everything | Best tool-calling support on GitHub Models; well within free-tier rate limits |
 | Dietary = hard constraint | Union of all restrictions — any violation disqualifies a restaurant |
 | Budget = median | Protects against outliers pulling the ceiling too high or low |
 | Mode = majority vote | Democratic; agent explains the tiebreak in its reasoning |
-| Insights via Claude API | Natural language > charts for a Slack-native experience |
+| Insights via LLM | Natural language > charts for a Slack-native experience |
 
 ---
 
 ## Setup
 
-### 1. Create a Slack App
+### 1. Install uv
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+uv is the package and environment manager for this project. It replaces pip and venv.
+
+### 2. Create a Slack App
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
-2. Under **Socket Mode** → Enable Socket Mode → Generate an App-Level Token (`xapp-...`)
+2. Under **Socket Mode** → Enable Socket Mode → Generate an App-Level Token (`xapp-...`) with `connections:write` scope
 3. Under **OAuth & Permissions** → Add Bot Token Scopes:
-   - `commands`, `chat:write`, `chat:write.public`, `im:write`
+   - `commands`, `chat:write`, `chat:write.public`, `im:write`, `channels:read`
 4. Under **Slash Commands** → Add `/lunch`
-5. Under **Interactivity & Shortcuts** → Enable → Request URL can be anything (Socket Mode ignores it)
+5. Under **Interactivity & Shortcuts** → Enable (required for modals and buttons)
 6. Install to workspace → copy Bot Token (`xoxb-...`)
 
-### 2. Configure environment
+> No redirect URIs are required. Socket Mode uses an outbound WebSocket connection
+> from your server to Slack — no inbound HTTP endpoint is ever registered.
+
+### 3. Get a GitHub Token
+
+Go to [github.com/settings/tokens](https://github.com/settings/tokens) → Generate a classic token.
+No special scopes needed — GitHub Models only requires a valid token.
+
+This single token covers **all LLM calls** in the project (agent orchestration + spend insights).
+
+### 4. Configure environment
 
 ```bash
 cp .env.example .env
-# Fill in SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SWIGGY_API_KEY, ANTHROPIC_API_KEY
 ```
 
-### 3. Run
+Fill in the four required variables:
+
+```bash
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+SWIGGY_API_KEY=...
+GITHUB_TOKEN=ghp_...
+```
+
+Everything else has a working default and can be left as-is for the demo.
+
+### 5. Run
 
 ```bash
 # Option A — Docker (recommended for demo)
 docker compose up --build
 
 # Option B — Local with uv
-uv sync                          # creates .venv + installs all deps from pyproject.toml
+uv sync                           # creates .venv + installs all deps
 uv run uvicorn main:api --reload
 ```
 
-> **uv** is the package and environment manager for this project.
-> Install it first if needed:
-> ```bash
-> curl -LsSf https://astral.sh/uv/install.sh | sh
-> ```
+### Health check
+
+```
+GET http://localhost:8000/health
+→ {"status": "ok", "service": "LunchLedger"}
+```
+
+---
+
+## Environment Variables
+
+### Required
+
+| Variable | Where to get it |
+|---|---|
+| `SLACK_BOT_TOKEN` | Slack App → OAuth & Permissions → Bot User OAuth Token (`xoxb-...`) |
+| `SLACK_APP_TOKEN` | Slack App → Basic Information → App-Level Tokens (`xapp-...`) |
+| `SWIGGY_API_KEY` | Swiggy MCP Builders Club dashboard |
+| `GITHUB_TOKEN` | [github.com/settings/tokens](https://github.com/settings/tokens) |
+
+### Optional (have sensible defaults)
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SWIGGY_MCP_URL` | `https://mcp.swiggy.com/sse` | Override if Swiggy changes the endpoint |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./data/lunchleger.db` | SQLite file path |
+| `SESSION_TIMEOUT_MINUTES` | `15` | How long a session waits for preferences |
+| `DEFAULT_MONTHLY_BUDGET` | `15000` | Default team budget in ₹ |
+| `DEFAULT_LAT` | `12.9716` | Restaurant search latitude (Bangalore) |
+| `DEFAULT_LNG` | `77.5946` | Restaurant search longitude (Bangalore) |
 
 ---
 
@@ -115,25 +172,31 @@ uv run uvicorn main:api --reload
 | Command | Description |
 |---|---|
 | `/lunch start` | Open a new team lunch session |
-| `/lunch go` | Trigger the agent immediately |
-| `/lunch status` | See who's joined the current session |
+| `/lunch go` | Trigger the agent immediately (skip the timeout) |
+| `/lunch status` | See who has joined and how much time is left |
 | `/lunch cancel` | Cancel the active session |
 | `/lunch report` | Weekly spend summary |
 | `/lunch report monthly` | Monthly spend summary |
-| `/lunch budget set 15000` | Set monthly team budget (₹) |
+| `/lunch budget set 15000` | Set the monthly team food budget (₹) |
 | `/lunch insights` | AI-generated spend pattern analysis |
 
 ---
 
 ## Tech Stack
 
-- **[FastAPI](https://fastapi.tiangolo.com/)** — async API server
-- **[Slack Bolt for Python](https://slack.dev/bolt-python/)** — Slack bot framework
-- **[LangChain](https://python.langchain.com/)** — agent orchestration
-- **[Swiggy MCP](https://mcp.swiggy.com/)** — Food + Dineout MCP servers
-- **[Anthropic Claude API](https://anthropic.com/)** — spend insight generation
-- **SQLAlchemy + aiosqlite** — async SQLite ORM
-- **Pydantic v2** — data validation throughout
+| Layer | Technology |
+|---|---|
+| Language | Python 3.12 |
+| Package / Env Manager | [uv](https://docs.astral.sh/uv/) |
+| API Framework | FastAPI + Uvicorn |
+| Slack Integration | Slack Bolt for Python (Socket Mode) |
+| Agent Orchestration | LangChain (ReAct) |
+| LLM | `gpt-4o-mini` via [GitHub Models](https://github.com/marketplace/models) |
+| MCP Servers | Swiggy Food MCP + Dineout MCP |
+| Database | SQLite via aiosqlite + SQLAlchemy async ORM |
+| Data Validation | Pydantic v2 |
+| HTTP Client | httpx (async) |
+| Containerisation | Docker + Docker Compose (uv base image) |
 
 ---
 
@@ -141,27 +204,28 @@ uv run uvicorn main:api --reload
 
 ```
 lunchleger/
-├── main.py                      # FastAPI entrypoint + Socket Mode startup
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
+├── main.py                           # FastAPI entrypoint + Socket Mode lifespan startup
+├── pyproject.toml                    # uv project manifest + all dependencies
+├── .python-version                   # pins Python 3.12
+├── Dockerfile                        # ghcr.io/astral-sh/uv base image
+├── docker-compose.yml                # one-command run with SQLite volume
+├── .env.example                      # all env vars with descriptions
 └── app/
     ├── models/
-    │   └── schemas.py           # Pydantic models: preferences, sessions, orders, spend
+    │   └── schemas.py                # Pydantic v2 models: preferences, sessions, orders, spend
     ├── core/
-    │   ├── session_manager.py   # In-memory session lifecycle
-    │   └── preference_aggregator.py  # Constraint satisfaction + scoring
+    │   ├── session_manager.py        # In-memory session lifecycle + auto-expiry
+    │   └── preference_aggregator.py  # Constraint satisfaction + cuisine scoring
     ├── db/
-    │   ├── database.py          # SQLAlchemy async engine + ORM tables
-    │   └── ledger.py            # Repository: save orders, read spend summaries
+    │   ├── database.py               # SQLAlchemy async engine + ORM table definitions
+    │   └── ledger.py                 # Repository: save orders, read spend summaries
     ├── agent/
-    │   ├── swiggy_client.py     # Async wrappers for Food + Dineout MCP tools
-    │   ├── lunch_agent.py       # LangChain ReAct agent + multi-MCP routing
-    │   └── insights.py          # Claude API spend insight generator
+    │   ├── swiggy_client.py          # Async HTTP wrappers for Food + Dineout MCP tools
+    │   ├── lunch_agent.py            # LangChain ReAct agent + multi-MCP routing
+    │   └── insights.py               # gpt-4o-mini spend insight generator (GitHub Models)
     └── bot/
-        ├── handlers.py          # All slash commands + interaction handlers
-        └── blocks.py            # Block Kit message builders
+        ├── handlers.py               # All slash commands + Slack interaction handlers
+        └── blocks.py                 # Block Kit message and modal builders
 ```
 
 ---
@@ -169,8 +233,8 @@ lunchleger/
 ## Built for Swiggy MCP Builders Club
 
 This project was built as part of the [Swiggy MCP Builders Club](https://mcp.swiggy.com/builders/developers/).
-It uses the **Food MCP** and **Dineout MCP** servers, chaining them through a single LangChain agent
-that routes based on team preference voting.
+It uses the **Food MCP** and **Dineout MCP** servers, chaining them through a single LangChain
+ReAct agent that routes based on team preference voting — delivery or dine-out, decided democratically.
 
-The financial layer — spend tracking, budget alerts, and Claude-generated insights — is the
-differentiating feature: treating team food spend as an operations problem, not just an ordering problem.
+The financial layer — spend tracking, budget alerts, and AI-generated insights — is the
+differentiating angle: treating team food spend as an operations problem, not just an ordering problem.

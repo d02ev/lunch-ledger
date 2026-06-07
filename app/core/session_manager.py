@@ -1,48 +1,90 @@
 from __future__ import annotations
 import os
-from openai import AsyncOpenAI
-from app.models import SpendSummary
+import uuid
+from datetime import datetime, timedelta
+from app.models import LunchSession, MemberPreference
 
-_client = AsyncOpenAI(
-    base_url="https://models.inference.ai.azure.com",
-    api_key=os.getenv("GITHUB_TOKEN"),
-)
+SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT_MINUTES", "15"))
 
 
-async def generate_insight(summary: SpendSummary) -> str:
+class SessionManager:
     """
-    Uses gpt-4o-mini via GitHub Models to generate a 2-3 sentence
-    spend insight based on the team's food spend data.
+    In-memory store for active lunch sessions.
+    Sessions expire after SESSION_TIMEOUT minutes.
     """
-    budget_status = (
-        "on track"       if summary.total_spend <= summary.budget * 0.8
-        else "nearing limit" if summary.total_spend <= summary.budget
-        else "over budget"
-    )
-    delivery_pct = (
-        int(summary.delivery_spend / summary.total_spend * 100)
-        if summary.total_spend > 0 else 0
-    )
 
-    prompt = (
-        "You are a financial advisor for a small team's food budget. "
-        "Analyze this spend data and give a 2-3 sentence actionable insight. "
-        "Be specific, practical, and slightly conversational. No bullet points.\n\n"
-        f"Period: {summary.period}\n"
-        f"Total spend: ₹{summary.total_spend} / Budget: ₹{summary.budget} ({budget_status})\n"
-        f"Delivery: ₹{summary.delivery_spend} ({delivery_pct}%) | "
-        f"Dine-out: ₹{summary.dineout_spend} ({100 - delivery_pct}%)\n"
-        f"Orders placed: {summary.session_count}\n"
-        f"Top restaurant: {summary.top_restaurant or 'N/A'}\n"
-        f"Per-member spend: {summary.per_member}\n\n"
-        "Give one observation about the spending pattern and one concrete saving suggestion."
-    )
+    def __init__(self) -> None:
+        self._sessions: dict[str, LunchSession] = {}
 
-    response = await _client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=200,
-        temperature=0.7,
-    )
+    # ── Session lifecycle ──────────────────────────────────────────────────────
 
-    return response.choices[0].message.content.strip()
+    def create(self, channel_id: str, created_by: str, message_ts: str | None = None) -> LunchSession:
+        session_id = str(uuid.uuid4())[:8].upper()   # short, readable ID
+        session = LunchSession(
+            session_id=session_id,
+            channel_id=channel_id,
+            created_by=created_by,
+            expires_at=datetime.utcnow() + timedelta(minutes=SESSION_TIMEOUT),
+            message_ts=message_ts,
+        )
+        self._sessions[session_id] = session
+        return session
+
+    def get(self, session_id: str) -> LunchSession | None:
+        session = self._sessions.get(session_id)
+        if session and self._is_expired(session):
+            session.status = "cancelled"
+        return session
+
+    def get_active_for_channel(self, channel_id: str) -> LunchSession | None:
+        for session in self._sessions.values():
+            if session.channel_id == channel_id and session.status == "open":
+                if not self._is_expired(session):
+                    return session
+        return None
+
+    def cancel(self, session_id: str) -> bool:
+        session = self._sessions.get(session_id)
+        if session:
+            session.status = "cancelled"
+            return True
+        return False
+
+    def mark_processing(self, session_id: str) -> None:
+        if s := self._sessions.get(session_id):
+            s.status = "processing"
+
+    def mark_completed(self, session_id: str) -> None:
+        if s := self._sessions.get(session_id):
+            s.status = "completed"
+
+    # ── Preferences ───────────────────────────────────────────────────────────
+
+    def add_preference(self, session_id: str, pref: MemberPreference) -> bool:
+        session = self.get(session_id)
+        if not session or session.status != "open":
+            return False
+        session.preferences[pref.member_id] = pref
+        return True
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _is_expired(self, session: LunchSession) -> bool:
+        return datetime.utcnow() > session.expires_at
+
+    def members_joined(self, session_id: str) -> list[str]:
+        session = self.get(session_id)
+        if not session:
+            return []
+        return [p.member_name for p in session.preferences.values()]
+
+    def time_remaining(self, session_id: str) -> int:
+        """Returns minutes remaining, 0 if expired."""
+        session = self.get(session_id)
+        if not session:
+            return 0
+        delta = session.expires_at - datetime.utcnow()
+        return max(0, int(delta.total_seconds() / 60))
+
+
+session_manager = SessionManager()
